@@ -10,7 +10,9 @@ This project allows you to use a simple ESP32-S3 powered display to act as a Lib
 > *Note: I'm in the UK so haven't really tested this with non-UK settings....*
 
 ---
-https://buymeacoffee.com/heisenbug303
+
+[![Buy Me A Coffee](buymeacoffee.png)](https://buymeacoffee.com/heisenbug303)
+
 ---
 
 ## 📱 Device Screen Output
@@ -31,7 +33,7 @@ https://buymeacoffee.com/heisenbug303
 *   **Web Administration Portal**: A secure, mobile-friendly web administration panel accessed directly over Wi-Fi, featuring:
     *   Separate menus for follower accounts, alerts/tolerances, and hardware commands.
     *   Password management (enforcing a secure custom password).
-    *   Diagnostics page (`/debug-info`) with network metrics, uptime, and communication logs.
+    *   Diagnostics page with network metrics, uptime, and communication logs.
     *   Configuration backup and restore (JSON import/export).
     *   OTA firmware updating.
 
