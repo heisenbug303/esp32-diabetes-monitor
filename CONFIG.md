@@ -31,7 +31,7 @@ All settings are configured through a local Web Admin portal hosted by the devic
     ```
 3.  You will be prompted for authentication. Enter the default credentials:
     *   **Username**: `admin`
-    *   **Password**: `admin`
+    *   **Password**: `<Temp password on device display>`
 4.  **Important Security Step**: Since you are using the default temporary password, the system will immediately redirect you to the **Change Portal Password** (`/change-password`) screen.
 5.  Enter a new secure password (minimum 6 characters), confirm it, and click **Save Password**. The system will save the password and redirect you back to the home landing page.
 
