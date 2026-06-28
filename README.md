@@ -47,7 +47,9 @@ This project allows you to use a simple ESP32-S3 powered display to act as a Lib
 *   **Display Library**: LovyanGFX configuration file for ST7701 & GT911.
 
 > [!TIP]
-> **Aliexpress Link**: Here's the screen hardware I used: [ESP32-S3 4-inch Smart Display (Aliexpress)](https://www.aliexpress.com/item/1005008214679682.html)
+> **Aliexpress Link**: Here's the hardware I used: [ESP32-S3 4-inch Smart Display (Aliexpress)](https://www.aliexpress.com/item/1005008214679682.html)
+
+That hardware is "ready to go". It's got the controller, screen, everything. Just power it up, flash with the firmware and enjoy!
 
 ---
 
