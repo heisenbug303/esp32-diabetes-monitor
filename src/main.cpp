@@ -15,8 +15,9 @@ LGFX gfx;
 
 #define GRAPH_HISTORY_SIZE 450
 
-#define BUILD_VERSION "1.0.26"
+#define BUILD_VERSION "1.0.34"
 const char ota_signature[] = "CGM-OTA-SIGNATURE:" BUILD_VERSION;
+
 
 // Configuration variables
 char llu_email[64] = "";
@@ -39,6 +40,91 @@ char dm_start_sending[32] = ""; // "YYYY-MM-DDTHH:MM"
 char dm_stop_sending[32] = "";  // "YYYY-MM-DDTHH:MM"
 char dm_timezone_json[32] = "Europe/London";
 char dm_timezone_posix[64] = "GMT0BST,M3.5.0/1,M10.5.0/2";
+
+// Category Assignment configurations
+bool dm_auto_category = false;
+int dm_fallback_category = 8;
+int dm_b_start = 480;
+int dm_b_end = 510;
+int dm_l_start = 720;
+int dm_l_end = 750;
+int dm_d_start = 1140;
+int dm_d_end = 1170;
+bool dm_2fa_pending = false;
+char device_name[32] = "ESP32-CGM-Display";
+
+
+struct DMCategory {
+  int id;
+  char name[32];
+};
+
+struct CategoryTimeRule {
+  int category_id;
+  int start_min;
+  int end_min;
+  bool enabled;
+};
+
+DMCategory dm_categories[32];
+int dm_custom_input_ids[16] = {0};
+int dm_categories_count = 0;
+
+CategoryTimeRule dm_cat_rules[24];
+int dm_cat_rules_count = 0;
+
+void initializeDefaultCategories() {
+  const char* default_names[] = {
+    "Snack", "Before breakfast", "After breakfast", "Before lunch", "After lunch",
+    "Before dinner", "After dinner", "Night", "Other", "Fasting glucose",
+    "Before bed", "Breakfast", "Lunch", "Dinner", "Before exercise", "After exercise"
+  };
+  for (int i = 0; i < 16; i++) {
+    dm_categories[i].id = i;
+    strncpy(dm_categories[i].name, default_names[i], sizeof(dm_categories[i].name) - 1);
+    dm_categories[i].name[sizeof(dm_categories[i].name) - 1] = '\0';
+  }
+  dm_categories_count = 16;
+}
+
+void initializeDefaultCategoryRules() {
+  int after_b_end = dm_l_start - 61;
+  if (after_b_end < dm_b_end + 1) after_b_end = dm_b_end + 1;
+  
+  int after_l_end = dm_d_start - 61;
+  if (after_l_end < dm_l_end + 1) after_l_end = dm_l_end + 1;
+  
+  int after_d_end = 21 * 60 - 1; // 20:59
+  if (after_d_end < dm_d_end + 1) after_d_end = dm_d_end + 1;
+  
+  int night_end = dm_b_start - 61;
+  if (night_end < 0) night_end = 0;
+
+  dm_cat_rules[0] = {1,  dm_b_start - 60, dm_b_start - 1, true};
+  dm_cat_rules[1] = {11, dm_b_start,      dm_b_end,       true};
+  dm_cat_rules[2] = {2,  dm_b_end + 1,    after_b_end,    true};
+  
+  dm_cat_rules[3] = {3,  dm_l_start - 60, dm_l_start - 1, true};
+  dm_cat_rules[4] = {12, dm_l_start,      dm_l_end,       true};
+  dm_cat_rules[5] = {4,  dm_l_end + 1,    after_l_end,    true};
+  
+  dm_cat_rules[6] = {5,  dm_d_start - 60, dm_d_start - 1, true};
+  dm_cat_rules[7] = {13, dm_d_start,      dm_d_end,       true};
+  dm_cat_rules[8] = {6,  dm_d_end + 1,    after_d_end,    true};
+  
+  dm_cat_rules[9] =  {10, 21 * 60, 24 * 60 - 1, true};
+  dm_cat_rules[10] = {7,  0,       night_end,   true};
+  
+  dm_cat_rules_count = 11;
+}
+
+String formatMinutesToHM(int minutes) {
+  int h = (minutes / 60) % 24;
+  int m = minutes % 60;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%02d:%02d", h, m);
+  return String(buf);
+}
 
 // Diabetes:M auth caches
 char dm_token[512] = "";
@@ -315,6 +401,9 @@ void handleLocalGeneralGet();
 void handleLocalSaveGeneralPost();
 void handleLocalHardwareGet();
 void handleLocalExportConfig();
+void handleLocalWifiGet();
+void handleLocalWifiSave();
+void showDiagnosticsScreen();
 void handleLocalImportConfigGet();
 void handleLocalImportConfig();
 const char* getResetReasonStr(esp_reset_reason_t reason);
@@ -331,6 +420,8 @@ void handleLocalDMGet();
 void handleLocalDMSave();
 void handleLocalDMTestConnection();
 void handleLocalDMTestUpload();
+void handleLocalDebugDM();
+void handleAuthExpired();
 void initTimeNTP();
 bool isTimeSynced();
 time_t parseDateTime(const String& str);
@@ -340,8 +431,14 @@ void addDMLog(time_t ts, float val, const String &status);
 void addDMHeartbeatLog(time_t ts, const String &status);
 bool diabetesMLogin(const char* two_fa_code, String &out_err);
 bool diabetesMGetProfile(String &out_info);
+bool diabetesMGetCategories(String &out_err);
 bool diabetesMUploadReading(float glucose_mgdl, const String &notes, String &out_err);
 bool uploadWithRetry(float glucose_mgdl, const String &notes, String &out_err);
+void parseAndSaveSettings(JsonVariant settings);
+int getSuggestedCategory(int hour, int minute);
+void set2FAPending(bool pending);
+
+
 
 
 bool checkAuth();
@@ -422,6 +519,9 @@ void loadPreferences() {
   Preferences preferences;
   preferences.begin("cgm-config", true); // Open in read-only mode
   
+  String dev_name = preferences.getString("dev_name", "ESP32-CGM-Display");
+  dev_name.toCharArray(device_name, sizeof(device_name));
+  
   String email = preferences.getString("email", "");
   String password = preferences.getString("password", "");
   String region = preferences.getString("region", "eu");
@@ -483,6 +583,38 @@ void loadPreferences() {
   String dm_cookies_str = preferences.getString("dm_cookies", "");
   String dm_user_id_str = preferences.getString("dm_user_id", "");
   String dm_last_ts_str = preferences.getString("dm_last_ts", "");
+  
+  dm_auto_category = preferences.getBool("dm_auto_cat", false);
+  dm_fallback_category = preferences.getInt("dm_fallback_cat", 8);
+  dm_b_start = preferences.getInt("dm_b_start", 480);
+  dm_b_end = preferences.getInt("dm_b_end", 510);
+  dm_l_start = preferences.getInt("dm_l_start", 720);
+  dm_l_end = preferences.getInt("dm_l_end", 750);
+  dm_d_start = preferences.getInt("dm_d_start", 1140);
+  dm_d_end = preferences.getInt("dm_d_end", 1170);
+  dm_2fa_pending = preferences.getBool("dm_2fa_pend", false);
+  
+  initializeDefaultCategories();
+  
+  int custom_count = preferences.getInt("dm_custom_cnt", 0);
+  if (custom_count > 16) custom_count = 16;
+  if (custom_count > 0) {
+    size_t read_len = preferences.getBytes("dm_cats", &dm_categories[16], 16 * sizeof(DMCategory));
+    int loaded_cnt = read_len / sizeof(DMCategory);
+    if (loaded_cnt < custom_count) custom_count = loaded_cnt;
+    dm_categories_count = 16 + custom_count;
+    preferences.getBytes("dm_input_ids", dm_custom_input_ids, sizeof(dm_custom_input_ids));
+  }
+  
+  dm_cat_rules_count = preferences.getInt("dm_cat_rules_cnt", 0);
+  if (dm_cat_rules_count > 24 || dm_cat_rules_count < 0) dm_cat_rules_count = 0;
+  if (dm_cat_rules_count > 0) {
+    size_t read_len = preferences.getBytes("dm_cat_rules", dm_cat_rules, sizeof(dm_cat_rules));
+    int loaded_rules = read_len / sizeof(CategoryTimeRule);
+    if (loaded_rules < dm_cat_rules_count) dm_cat_rules_count = loaded_rules;
+  } else {
+    initializeDefaultCategoryRules();
+  }
   
   preferences.end();
   
@@ -866,6 +998,8 @@ void setup() {
   wm.setAPCallback(configModeCallback);
   wm.setConfigPortalTimeout(180); // Timeout portal after 3 minutes if no activity
   
+  WiFi.setHostname(device_name);
+  
   gfx.fillRect(0, 360, 480, 40, 0x121212);
   gfx.setTextColor(0x888888);
   gfx.drawCenterString("Connecting to WiFi...", 240, 370);
@@ -908,6 +1042,9 @@ void setup() {
   localServer.on("/save-diabetes-m", HTTP_POST, handleLocalDMSave);
   localServer.on("/test-dm-connection", HTTP_POST, handleLocalDMTestConnection);
   localServer.on("/test-dm-upload", HTTP_POST, handleLocalDMTestUpload);
+  localServer.on("/debug-dm", HTTP_GET, handleLocalDebugDM);
+  localServer.on("/wifi", HTTP_GET, handleLocalWifiGet);
+  localServer.on("/save-wifi", HTTP_POST, handleLocalWifiSave);
   localServer.begin();
   Serial.print("Local WebServer started on IP: ");
   Serial.println(WiFi.localIP());
@@ -958,9 +1095,12 @@ void loop() {
     drawTopStatusBar();
   }
   
-  // Touch screen interaction: Force immediate poll/refresh
+  // Touch screen interaction: Force immediate poll/refresh or diagnostics
   uint16_t tx, ty;
   static bool was_touched = false;
+  static unsigned long touch_start_time = 0;
+  static bool long_press_triggered = false;
+  
   bool is_touched = gfx.getTouch(&tx, &ty);
   
   // Filter out invalid/phantom 0,0 touches
@@ -968,32 +1108,48 @@ void loop() {
     is_touched = false;
   }
   
-  if (has_credentials && is_touched && !was_touched) {
-    static unsigned long last_touch = 0;
-    if (millis() - last_touch > 60000) { // Throttle manual refreshes to 60-second intervals
-      last_touch = millis();
-      Serial.println("Screen touched. Forcing immediate update...");
-      
-      gfx.setFont(&fonts::DejaVu18);
-      gfx.setTextColor(0x33B5E5);
-      gfx.drawCenterString("Refreshing...", 240, 310);
-      
-      bool success = libreLinkUpFetchData();
-      drawDashboard();
-      
-      if (!success) {
-        gfx.setFont(&fonts::DejaVu18);
-        gfx.setTextColor(0xD9534F);
-        gfx.drawCenterString("Refresh Failed!", 240, 310);
+  if (has_credentials) {
+    if (is_touched) {
+      if (!was_touched) {
+        touch_start_time = millis();
+        long_press_triggered = false;
+      } else {
+        if (!long_press_triggered && (millis() - touch_start_time >= 1500)) {
+          long_press_triggered = true;
+          Serial.println("Long press detected. Showing diagnostics screen...");
+          showDiagnosticsScreen();
+          is_touched = false;
+        }
       }
-      
-      last_poll = millis(); // Reset regular timer
+    } else {
+      if (was_touched && !long_press_triggered) {
+        static unsigned long last_touch = 0;
+        if (millis() - last_touch > 60000) { // Throttle manual refreshes to 60-second intervals
+          last_touch = millis();
+          Serial.println("Screen touched. Forcing immediate update...");
+          
+          gfx.setFont(&fonts::DejaVu18);
+          gfx.setTextColor(0x33B5E5);
+          gfx.drawCenterString("Refreshing...", 240, 310);
+          
+          bool success = libreLinkUpFetchData();
+          drawDashboard();
+          
+          if (!success) {
+            gfx.setFont(&fonts::DejaVu18);
+            gfx.setTextColor(0xD9534F);
+            gfx.drawCenterString("Refresh Failed!", 240, 310);
+          }
+          
+          last_poll = millis(); // Reset regular timer
+        }
+      }
     }
   }
   was_touched = is_touched;
   
   // Diabetes:M background upload task
-  if (dm_enable_connection && dm_auto_send) {
+  if (dm_enable_connection && dm_auto_send && !dm_2fa_pending) {
     if (dm_next_send_epoch == 0 && isTimeSynced()) {
       recalculateNextSendTime();
     }
@@ -1070,7 +1226,7 @@ void loop() {
   }
 
   // Diabetes:M background heartbeat task
-  if (dm_enable_connection && dm_enable_heartbeat && strlen(dm_email) > 0 && strlen(dm_password) > 0) {
+  if (dm_enable_connection && dm_enable_heartbeat && !dm_2fa_pending && strlen(dm_email) > 0 && strlen(dm_password) > 0) {
     if (dm_next_heartbeat_epoch == 0 && isTimeSynced()) {
       dm_next_heartbeat_epoch = time(nullptr) + (dm_heartbeat_interval * 60);
       Serial.printf("[DM] Heartbeat initialized. Next check at epoch: %ld\n", (long)dm_next_heartbeat_epoch);
@@ -1084,24 +1240,33 @@ void loop() {
       dm_last_heartbeat_epoch = time(nullptr);
       
       if (!profile_ok) {
-        Serial.println("[DM] Heartbeat failed. Token may be expired. Attempting silent re-login...");
-        String login_err = "";
-        bool login_ok = diabetesMLogin(nullptr, login_err);
-        if (login_ok) {
-          Serial.println("[DM] Heartbeat re-login successful! Retrying profile fetch...");
-          profile_ok = diabetesMGetProfile(profile_info);
-          if (profile_ok) {
-            dm_last_heartbeat_status = "Success (Silent Re-auth)";
-          } else {
-            dm_last_heartbeat_status = "Profile failed after re-login";
-          }
+        if (dm_enable_2fa) {
+          dm_last_heartbeat_status = "2FA Re-auth required";
+          set2FAPending(true);
         } else {
-          dm_last_heartbeat_status = "Re-login failed: " + login_err;
-          Serial.printf("[DM] Heartbeat silent re-login failed: %s\n", login_err.c_str());
+          Serial.println("[DM] Heartbeat failed. Token may be expired. Attempting silent re-login...");
+          String login_err = "";
+          bool login_ok = diabetesMLogin(nullptr, login_err);
+          if (login_ok) {
+            Serial.println("[DM] Heartbeat re-login successful! Retrying profile fetch...");
+            profile_ok = diabetesMGetProfile(profile_info);
+            if (profile_ok) {
+              dm_last_heartbeat_status = "Success (Silent Re-auth)";
+              String cat_err = "";
+              diabetesMGetCategories(cat_err);
+            } else {
+              dm_last_heartbeat_status = "Profile failed after re-login";
+            }
+          } else {
+            dm_last_heartbeat_status = "Re-login failed: " + login_err;
+            Serial.printf("[DM] Heartbeat silent re-login failed: %s\n", login_err.c_str());
+          }
         }
       } else {
         dm_last_heartbeat_status = "Success (Active)";
         Serial.println("[DM] Heartbeat success. Session is active.");
+        String cat_err = "";
+        diabetesMGetCategories(cat_err);
       }
       
       addDMHeartbeatLog(dm_last_heartbeat_epoch, dm_last_heartbeat_status);
@@ -1192,7 +1357,7 @@ void drawDashboard() {
     }
   }
   
-  int banner_top = (dm_enable_connection && dm_auto_send) ? 56 : 40;
+  int banner_top = (dm_enable_connection && dm_auto_send) ? (dm_2fa_pending ? 72 : 56) : 40;
   int banner_bottom = 180;
   int banner_height = banner_bottom - banner_top;
   
@@ -1373,7 +1538,7 @@ void drawHistoryGraph() {
 }
 
 void drawTopStatusBar() {
-  int bar_height = (dm_enable_connection && dm_auto_send) ? 56 : 40;
+  int bar_height = (dm_enable_connection && dm_auto_send) ? (dm_2fa_pending ? 72 : 56) : 40;
   gfx.fillRect(0, 0, 480, bar_height, 0xFFFFFF); // White background
   
   // Line 1: LibreLinkUp status & WiFi
@@ -1436,11 +1601,17 @@ void drawTopStatusBar() {
       last_sent_str = "None ";
     }
     
-    String line2_left = "Last: " + last_sent_str + "[" + dm_last_sent_status + "]";
+    String line2_left = "Last: " + last_sent_str;
     String line2_right = "Next: " + next_str;
     
     gfx.drawString(line2_left, 15, 31);
     gfx.drawString(line2_right, 330, 31);
+    
+    if (dm_2fa_pending) {
+      gfx.fillRect(0, 52, 480, 20, 0xCC0000); // Solid red background
+      gfx.setTextColor(0xFFFFFF); // White text
+      gfx.drawString("Diabetes:M - Please re-authenticate", 15, 53);
+    }
   }
 }
 
@@ -1530,6 +1701,7 @@ bool libreLinkUpLogin() {
 }
 
 bool libreLinkUpFetchData() {
+  last_glucose = 0.0; // Reset to 0 on new fetch attempt (internet loss check)
   llu_last_fetch_attempt_epoch = time(nullptr);
   llu_last_fetch_status = "Fetching...";
 
@@ -1701,6 +1873,8 @@ void handleLocalRoot() {
   String dm_status_text = "";
   if (!dm_enable_connection) {
     dm_status_text = "Disabled";
+  } else if (dm_2fa_pending) {
+    dm_status_text = "2FA Authentication Required";
   } else if (strlen(dm_email) == 0 || strlen(dm_password) == 0) {
     dm_status_text = "Awaiting configuration";
   } else if (dm_last_sent_epoch > 0) {
@@ -2504,6 +2678,7 @@ void handleLocalHardwareGet() {
   html += "<div class='card'>";
   html += "<h2>Hardware Control</h2>";
   html += "<a href='/update' class='btn btn-blue'>Update Firmware (OTA)</a>";
+  html += "<a href='/wifi' class='btn btn-blue'>Network & Wi-Fi Settings</a>";
   html += "<a href='/debug-info' class='btn btn-blue'>Debug Info</a>";
   html += "<a href='/reboot' class='btn btn-red' onclick='return confirm(\"Are you sure you want to reboot the device?\");'>Reboot Device</a>";
   html += "<a href='/factory-reset' class='btn btn-red' style='margin-top:40px;' onclick='return confirm(\"Are you sure you want to perform a factory reset? This will erase all Wi-Fi, password, settings and historical readings, and require a full reconfiguration.\");'>Reset to Factory Default</a>";
@@ -2859,7 +3034,8 @@ String deobfuscate(const String &input) {
 void handleLocalExportConfig() {
   if (!checkAuth()) return;
   
-  DynamicJsonDocument doc(4096);
+  DynamicJsonDocument doc(8192);
+  doc["device_name"] = device_name;
   doc["email"] = llu_email;
   doc["password"] = obfuscate(llu_password);
   doc["region"] = llu_region;
@@ -2898,6 +3074,37 @@ void handleLocalExportConfig() {
   doc["dm_last_ts"] = dm_last_uploaded_libre_ts;
   doc["dm_hb_en"] = dm_enable_heartbeat;
   doc["dm_hb_int"] = dm_heartbeat_interval;
+  doc["dm_auto_cat"] = dm_auto_category;
+  doc["dm_fallback_cat"] = dm_fallback_category;
+  doc["dm_b_start"] = dm_b_start;
+  doc["dm_b_end"] = dm_b_end;
+  doc["dm_l_start"] = dm_l_start;
+  doc["dm_l_end"] = dm_l_end;
+  doc["dm_d_start"] = dm_d_start;
+  doc["dm_d_end"] = dm_d_end;
+  doc["dm_2fa_pend"] = dm_2fa_pending;
+  
+  int custom_count = dm_categories_count - 16;
+  if (custom_count < 0) custom_count = 0;
+  doc["dm_custom_cnt"] = custom_count;
+  if (custom_count > 0) {
+    JsonArray cats_arr = doc.createNestedArray("dm_cats");
+    for (int i = 0; i < custom_count; i++) {
+      JsonObject cat_obj = cats_arr.createNestedObject();
+      cat_obj["id"] = dm_categories[16 + i].id;
+      cat_obj["input_id"] = dm_custom_input_ids[i];
+      cat_obj["name"] = dm_categories[16 + i].name;
+    }
+  }
+  
+  JsonArray dm_rules_arr = doc.createNestedArray("dm_cat_rules");
+  for (int i = 0; i < dm_cat_rules_count; i++) {
+    JsonObject rule_obj = dm_rules_arr.createNestedObject();
+    rule_obj["cat_id"] = dm_cat_rules[i].category_id;
+    rule_obj["start"] = dm_cat_rules[i].start_min;
+    rule_obj["end"] = dm_cat_rules[i].end_min;
+    rule_obj["en"] = dm_cat_rules[i].enabled;
+  }
   
   String json_str;
   serializeJson(doc, json_str);
@@ -2963,7 +3170,7 @@ void handleLocalImportConfig() {
   if (localServer.hasArg("config_json")) {
     String json_str = localServer.arg("config_json");
     
-    DynamicJsonDocument doc(4096);
+    DynamicJsonDocument doc(8192);
     DeserializationError err = deserializeJson(doc, json_str);
     if (err) {
       localServer.send(400, "text/plain", "Bad Request: JSON parse error: " + String(err.c_str()));
@@ -2977,6 +3184,10 @@ void handleLocalImportConfig() {
       return val;
     };
     
+    if (doc.containsKey("device_name")) {
+      String dev_name = doc["device_name"].as<String>();
+      dev_name.toCharArray(device_name, sizeof(device_name));
+    }
     if (doc.containsKey("email")) {
       String email = doc["email"].as<String>();
       email.toCharArray(llu_email, sizeof(llu_email));
@@ -3103,6 +3314,21 @@ void handleLocalImportConfig() {
       dm_heartbeat_interval = doc["dm_hb_int"].as<int>();
       if (dm_heartbeat_interval < 1) dm_heartbeat_interval = 15;
     }
+    if (doc.containsKey("dm_auto_cat")) {
+      dm_auto_category = doc["dm_auto_cat"].as<bool>();
+    }
+    if (doc.containsKey("dm_fallback_cat")) {
+      dm_fallback_category = doc["dm_fallback_cat"].as<int>();
+    }
+    if (doc.containsKey("dm_b_start")) dm_b_start = doc["dm_b_start"].as<int>();
+    if (doc.containsKey("dm_b_end")) dm_b_end = doc["dm_b_end"].as<int>();
+    if (doc.containsKey("dm_l_start")) dm_l_start = doc["dm_l_start"].as<int>();
+    if (doc.containsKey("dm_l_end")) dm_l_end = doc["dm_l_end"].as<int>();
+    if (doc.containsKey("dm_d_start")) dm_d_start = doc["dm_d_start"].as<int>();
+    if (doc.containsKey("dm_d_end")) dm_d_end = doc["dm_d_end"].as<int>();
+    if (doc.containsKey("dm_2fa_pend")) {
+      dm_2fa_pending = doc["dm_2fa_pend"].as<bool>();
+    }
 
     // Set TZ environment
     setenv("TZ", dm_timezone_posix, 1);
@@ -3123,6 +3349,7 @@ void handleLocalImportConfig() {
     preferences.putFloat("g_max", graph_max);
     preferences.putBytes("msg_rules", msg_rules, sizeof(msg_rules));
     preferences.putInt("msg_rules_cnt", msg_rules_count);
+    preferences.putString("dev_name", device_name);
     
     // Commit Diabetes:M settings
     preferences.putString("dm_email", dm_email);
@@ -3140,6 +3367,59 @@ void handleLocalImportConfig() {
     preferences.putBool("dm_hb_en", dm_enable_heartbeat);
     preferences.putInt("dm_hb_int", dm_heartbeat_interval);
     preferences.putBool("dm_conn_en", dm_enable_connection);
+    preferences.putBool("dm_auto_cat", dm_auto_category);
+    preferences.putInt("dm_fallback_cat", dm_fallback_category);
+    preferences.putInt("dm_b_start", dm_b_start);
+    preferences.putInt("dm_b_end", dm_b_end);
+    preferences.putInt("dm_l_start", dm_l_start);
+    preferences.putInt("dm_l_end", dm_l_end);
+    preferences.putInt("dm_d_start", dm_d_start);
+    preferences.putInt("dm_d_end", dm_d_end);
+    preferences.putBool("dm_2fa_pend", dm_2fa_pending);
+    
+    if (doc.containsKey("dm_custom_cnt")) {
+      int custom_cnt = doc["dm_custom_cnt"].as<int>();
+      if (custom_cnt > 16) custom_cnt = 16;
+      if (custom_cnt > 0 && doc.containsKey("dm_cats")) {
+        JsonArray cats_arr = doc["dm_cats"].as<JsonArray>();
+        int count = 0;
+        memset(dm_custom_input_ids, 0, sizeof(dm_custom_input_ids));
+        for (JsonVariant val : cats_arr) {
+          if (count >= custom_cnt) break;
+          dm_categories[16 + count].id = val["id"].as<int>();
+          dm_custom_input_ids[count] = val.containsKey("input_id") ? val["input_id"].as<int>() : 0;
+          String name = val["name"].as<String>();
+          name.toCharArray(dm_categories[16 + count].name, sizeof(dm_categories[16 + count].name));
+          count++;
+        }
+        dm_categories_count = 16 + count;
+        preferences.putInt("dm_custom_cnt", count);
+        preferences.putBytes("dm_cats", &dm_categories[16], count * sizeof(DMCategory));
+        preferences.putBytes("dm_input_ids", dm_custom_input_ids, sizeof(dm_custom_input_ids));
+      } else {
+        dm_categories_count = 16;
+        preferences.putInt("dm_custom_cnt", 0);
+      }
+    }
+    
+    if (doc.containsKey("dm_cat_rules")) {
+      JsonArray dm_rules_arr = doc["dm_cat_rules"].as<JsonArray>();
+      int count = 0;
+      for (JsonVariant val : dm_rules_arr) {
+        if (count >= 24) break;
+        dm_cat_rules[count].category_id = val["cat_id"].as<int>();
+        dm_cat_rules[count].start_min = val["start"].as<int>();
+        dm_cat_rules[count].end_min = val["end"].as<int>();
+        dm_cat_rules[count].enabled = val["en"].as<bool>();
+        count++;
+      }
+      dm_cat_rules_count = count;
+      preferences.putInt("dm_cat_rules_cnt", dm_cat_rules_count);
+      if (dm_cat_rules_count > 0) {
+        preferences.putBytes("dm_cat_rules", dm_cat_rules, dm_cat_rules_count * sizeof(CategoryTimeRule));
+      }
+    }
+    
     preferences.end();
     
     // Recalculate scheduling
@@ -3228,6 +3508,10 @@ bool diabetesMLogin(const char* two_fa_code, String &out_err) {
     strncpy(dm_token, token.c_str(), sizeof(dm_token));
     strncpy(dm_user_id, user_id.c_str(), sizeof(dm_user_id));
     
+    if (respDoc.containsKey("settings")) {
+      parseAndSaveSettings(respDoc["settings"]);
+    }
+    
     // Commit to NVS
     Preferences preferences;
     preferences.begin("cgm-config", false);
@@ -3236,6 +3520,7 @@ bool diabetesMLogin(const char* two_fa_code, String &out_err) {
     preferences.putString("dm_user_id", dm_user_id);
     preferences.end();
     
+    set2FAPending(false);
     return true;
   } else {
     if (response.indexOf("EMAIL_2FA_GENERATED") != -1) {
@@ -3244,12 +3529,27 @@ bool diabetesMLogin(const char* two_fa_code, String &out_err) {
       preferences.begin("cgm-config", false);
       preferences.putString("dm_cookies", dm_cookies);
       preferences.end();
+      set2FAPending(true);
       return false;
     }
     
     out_err = "HTTP Code: " + String(httpCode) + " - " + response;
     return false;
   }
+}
+
+void handleAuthExpired() {
+  dm_token[0] = '\0';
+  dm_cookies[0] = '\0';
+  
+  Preferences preferences;
+  preferences.begin("cgm-config", false);
+  preferences.putString("dm_token", "");
+  preferences.putString("dm_cookies", "");
+  preferences.end();
+  
+  set2FAPending(true);
+  Serial.println("[DM] Authentication expired. Cleared token and set 2FA pending.");
 }
 
 bool diabetesMGetProfile(String &out_info) {
@@ -3288,10 +3588,189 @@ bool diabetesMGetProfile(String &out_info) {
     
     String email = doc["email"].as<String>();
     String user_id = doc["user_id"].as<String>();
+    
+    if (doc.containsKey("settings")) {
+      parseAndSaveSettings(doc["settings"]);
+    }
+    
+    set2FAPending(false);
+    
+    // Auto-fetch dynamic custom categories
+    String cat_err = "";
+    diabetesMGetCategories(cat_err);
+    
     out_info = "Connected as: " + email + " (User ID: " + user_id + ")";
     return true;
   } else {
+    if (httpCode == 401 || response.indexOf("Token validation failed") != -1) {
+      handleAuthExpired();
+    }
     out_info = "HTTP Code: " + String(httpCode) + " - " + response;
+    return false;
+  }
+}
+
+void parseAndSaveSettings(JsonVariant settings) {
+  if (settings.isNull()) return;
+  
+  bool updated = false;
+  if (settings.containsKey("breakfast_meal_time")) {
+    int b_start = settings["breakfast_meal_time"][0].as<int>();
+    int b_end = settings["breakfast_meal_time"][1].as<int>();
+    if (b_start != dm_b_start || b_end != dm_b_end) {
+      dm_b_start = b_start;
+      dm_b_end = b_end;
+      updated = true;
+    }
+  }
+  if (settings.containsKey("lunch_meal_time")) {
+    int l_start = settings["lunch_meal_time"][0].as<int>();
+    int l_end = settings["lunch_meal_time"][1].as<int>();
+    if (l_start != dm_l_start || l_end != dm_l_end) {
+      dm_l_start = l_start;
+      dm_l_end = l_end;
+      updated = true;
+    }
+  }
+  if (settings.containsKey("dinner_meal_time")) {
+    int d_start = settings["dinner_meal_time"][0].as<int>();
+    int d_end = settings["dinner_meal_time"][1].as<int>();
+    if (d_start != dm_d_start || d_end != dm_d_end) {
+      dm_d_start = d_start;
+      dm_d_end = d_end;
+      updated = true;
+    }
+  }
+  
+  if (updated) {
+    Preferences preferences;
+    preferences.begin("cgm-config", false);
+    preferences.putInt("dm_b_start", dm_b_start);
+    preferences.putInt("dm_b_end", dm_b_end);
+    preferences.putInt("dm_l_start", dm_l_start);
+    preferences.putInt("dm_l_end", dm_l_end);
+    preferences.putInt("dm_d_start", dm_d_start);
+    preferences.putInt("dm_d_end", dm_d_end);
+    preferences.end();
+    Serial.println("Updated and saved meal times from settings.");
+  }
+}
+
+int getSuggestedCategory(int hour, int minute) {
+  int m = hour * 60 + minute;
+  
+  for (int i = 0; i < dm_cat_rules_count; i++) {
+    if (!dm_cat_rules[i].enabled) continue;
+    
+    int start = dm_cat_rules[i].start_min;
+    int end = dm_cat_rules[i].end_min;
+    
+    if (start <= end) {
+      if (m >= start && m <= end) {
+        return dm_cat_rules[i].category_id;
+      }
+    } else {
+      if (m >= start || m <= end) {
+        return dm_cat_rules[i].category_id;
+      }
+    }
+  }
+  
+  return dm_fallback_category;
+}
+
+void set2FAPending(bool pending) {
+  if (dm_2fa_pending != pending) {
+    dm_2fa_pending = pending;
+    Preferences preferences;
+    preferences.begin("cgm-config", false);
+    preferences.putBool("dm_2fa_pend", dm_2fa_pending);
+    preferences.end();
+    Serial.printf("[DM] 2FA pending state changed to: %s\n", pending ? "TRUE" : "FALSE");
+  }
+}
+
+bool diabetesMGetCategories(String &out_err) {
+  if (strlen(dm_token) == 0) {
+    out_err = "Not authenticated";
+    return false;
+  }
+  
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  
+  if (!http.begin(client, "https://analytics.diabetes-m.com/api/v1/user/categories/list")) {
+    out_err = "Failed to initialize HTTP client";
+    return false;
+  }
+  
+  http.addHeader("Accept", "application/json");
+  http.addHeader("User-Agent", "Mozilla/5.0");
+  http.addHeader("Authorization", "Bearer " + String(dm_token));
+  if (strlen(dm_cookies) > 0) {
+    http.addHeader("Cookie", dm_cookies);
+  }
+  
+  int httpCode = http.GET();
+  String response = http.getString();
+  http.end();
+  
+  if (httpCode == 200) {
+    DynamicJsonDocument doc(8192);
+    DeserializationError err = deserializeJson(doc, response);
+    if (err) {
+      out_err = "Categories parse error: " + String(err.c_str());
+      return false;
+    }
+    
+    JsonArray arr;
+    bool has_cats = false;
+    if (doc["categories"].is<JsonArray>()) {
+      arr = doc["categories"].as<JsonArray>();
+      has_cats = true;
+    } else if (doc["categories"]["categories"].is<JsonArray>()) {
+      arr = doc["categories"]["categories"].as<JsonArray>();
+      has_cats = true;
+    }
+    
+    if (has_cats) {
+      int custom_cnt = 0;
+      memset(dm_custom_input_ids, 0, sizeof(dm_custom_input_ids));
+      for (JsonVariant val : arr) {
+        if (custom_cnt >= 16) break;
+        if (val["deleted"].as<bool>()) continue;
+        
+        int cat_id = val["category_id"].as<int>();
+        int input_id = val["input_id"].as<int>();
+        String name = val["name"].as<String>();
+        
+        dm_categories[16 + custom_cnt].id = cat_id;
+        dm_custom_input_ids[custom_cnt] = input_id;
+        name.toCharArray(dm_categories[16 + custom_cnt].name, sizeof(dm_categories[16 + custom_cnt].name));
+        custom_cnt++;
+      }
+      
+      dm_categories_count = 16 + custom_cnt;
+      
+      Preferences preferences;
+      preferences.begin("cgm-config", false);
+      preferences.putInt("dm_custom_cnt", custom_cnt);
+      if (custom_cnt > 0) {
+        preferences.putBytes("dm_cats", &dm_categories[16], custom_cnt * sizeof(DMCategory));
+        preferences.putBytes("dm_input_ids", dm_custom_input_ids, sizeof(dm_custom_input_ids));
+      }
+      preferences.end();
+      Serial.printf("Downloaded and saved %d custom categories.\n", custom_cnt);
+      return true;
+    }
+    out_err = "No categories key in response";
+    return false;
+  } else {
+    if (httpCode == 401 || response.indexOf("Token validation failed") != -1) {
+      handleAuthExpired();
+    }
+    out_err = "HTTP Code: " + String(httpCode) + " - " + response;
     return false;
   }
 }
@@ -3340,7 +3819,29 @@ bool diabetesMUploadReading(float glucose_mgdl, const String &notes, String &out
   doc["basal_insulin_type"] = 32;
   doc["weight_entry"] = 0;
   doc["weight"] = 0;
-  doc["category"] = 8;
+  int category_id = dm_fallback_category;
+  if (dm_auto_category) {
+    time_t now = time(nullptr);
+    struct tm timeinfo;
+    if (localtime_r(&now, &timeinfo)) {
+      int suggested = getSuggestedCategory(timeinfo.tm_hour, timeinfo.tm_min);
+      if (suggested != 8) {
+        category_id = suggested;
+      }
+    }
+  }
+  
+  // Map category_id to input_id if it's a custom category
+  int upload_category = category_id;
+  for (int i = 0; i < 16; i++) {
+    if (dm_categories[16 + i].id == category_id) {
+      if (dm_custom_input_ids[i] > 0) {
+        upload_category = dm_custom_input_ids[i];
+      }
+      break;
+    }
+  }
+  doc["category"] = upload_category;
   doc["carb_ratio_factor"] = 0;
   doc["insulin_sensitivity_factor"] = 0;
   doc["notes"] = notes;
@@ -3429,6 +3930,11 @@ bool diabetesMUploadReading(float glucose_mgdl, const String &notes, String &out
 bool uploadWithRetry(float glucose_mgdl, const String &notes, String &out_err) {
   bool ok = diabetesMUploadReading(glucose_mgdl, notes, out_err);
   if (!ok && (out_err.indexOf("401") != -1 || out_err.indexOf("Unauthorized") != -1 || out_err.indexOf("authenticated") != -1)) {
+    if (dm_enable_2fa) {
+      set2FAPending(true);
+      out_err = "Auth expired, 2FA re-auth required";
+      return false;
+    }
     Serial.println("Token expired. Attempting automatic re-login...");
     String login_err;
     if (diabetesMLogin(nullptr, login_err)) {
@@ -3441,9 +3947,83 @@ bool uploadWithRetry(float glucose_mgdl, const String &notes, String &out_err) {
   return ok;
 }
 
+void handleLocalDebugDM() {
+  if (!checkAuth()) return;
+  
+  String output = "=== Diabetes:M Categories Debug Info ===\n\n";
+  output += "RAM State:\n";
+  output += "Connection Enabled: " + String(dm_enable_connection ? "Yes" : "No") + "\n";
+  output += "Email: " + String(dm_email) + "\n";
+  output += "Token Length: " + String(strlen(dm_token)) + "\n";
+  if (strlen(dm_token) > 0) {
+    output += "Token Prefix: " + String(dm_token).substring(0, 8) + "...\n";
+  }
+  output += "Cookies Length: " + String(strlen(dm_cookies)) + "\n";
+  if (strlen(dm_cookies) > 0) {
+    output += "Cookies Prefix: " + String(dm_cookies).substring(0, 30) + "...\n";
+  }
+  output += "Categories Count: " + String(dm_categories_count) + "\n";
+  output += "\nLoaded Categories in RAM:\n";
+  for (int i = 0; i < dm_categories_count; i++) {
+    output += String(i) + ". ID=" + String(dm_categories[i].id) + ", Name=\"" + String(dm_categories[i].name) + "\"\n";
+  }
+  
+  output += "\nNVS Saved Count:\n";
+  Preferences prefs;
+  prefs.begin("cgm-config", true);
+  output += "NVS dm_custom_cnt: " + String(prefs.getInt("dm_custom_cnt", -1)) + "\n";
+  prefs.end();
+  
+  output += "\n--- Running Live categories list query ---\n";
+  if (strlen(dm_token) == 0) {
+    output += "Cannot query: No token in RAM. Try testing connection first.\n";
+  } else {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    if (!http.begin(client, "https://analytics.diabetes-m.com/api/v1/user/categories/list")) {
+      output += "HTTP Client begin failed.\n";
+    } else {
+      http.addHeader("Accept", "application/json");
+      http.addHeader("User-Agent", "Mozilla/5.0");
+      http.addHeader("Authorization", "Bearer " + String(dm_token));
+      if (strlen(dm_cookies) > 0) {
+        http.addHeader("Cookie", dm_cookies);
+      }
+      int httpCode = http.GET();
+      output += "HTTP Status Code: " + String(httpCode) + "\n";
+      String response = http.getString();
+      output += "Response Length: " + String(response.length()) + "\n";
+      output += "Response Content:\n" + response + "\n";
+      http.end();
+    }
+  }
+  
+  localServer.send(200, "text/plain", output);
+}
+
 void handleLocalDMGet() {
   if (!checkAuth()) return;
   if (checkForceReset()) return;
+  
+  // Auto-sync dynamic custom categories on settings page load
+  if (dm_enable_connection && !dm_2fa_pending && WiFi.status() == WL_CONNECTED && strlen(dm_email) > 0 && strlen(dm_password) > 0) {
+    String cat_err = "";
+    bool success = false;
+    if (strlen(dm_token) > 0) {
+      success = diabetesMGetCategories(cat_err);
+    }
+    if (!success) {
+      if (!dm_enable_2fa) {
+        String login_err = "";
+        if (diabetesMLogin(nullptr, login_err)) {
+          diabetesMGetCategories(cat_err);
+        }
+      } else {
+        set2FAPending(true);
+      }
+    }
+  }
   
   String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'><style>";
   html += "body { font-family:sans-serif; background:#181a1b; color:#fff; padding:20px; text-align:center; }";
@@ -3459,7 +4039,7 @@ void handleLocalDMGet() {
   html += ".btn-grey { background:#555; margin-top:10px; }";
   html += ".btn-row { display:flex; gap:10px; margin-top:15px; }";
   html += ".btn-row button { flex:1; padding:10px; font-weight:bold; cursor:pointer; border-radius:4px; border:none; color:#fff; font-size:14px; }";
-  html += "</style></head><body onload='toggleConnectionFields();'>";
+  html += "</style></head><body onload='toggleConnectionFields(); initSlots();'>";
   
   html += "<div class='card'>";
   html += "<h2>Configure Diabetes:M</h2>";
@@ -3482,21 +4062,28 @@ void handleLocalDMGet() {
   html += "<div style='margin:5px 0;'><input type='checkbox' onclick='var x=document.getElementById(\"dm_password\");x.type=this.checked?\"text\":\"password\";'> Show Password</div>";
   html += "</div>";
   
-  html += "<div class='form-group' id='2fa_container' style='display:none;'>";
-  html += "<label>2FA Code (Verification / Test Only)</label>";
-  html += "<input type='text' id='two_fa_code' name='two_fa_code' placeholder='Enter code from email'>";
-  html += "<span style='font-size:12px;color:#888;'>Leave blank for first test; enter code here when prompted on 2FA generation.</span>";
+  html += "<div class='form-group'>";
+  html += "<label><input type='checkbox' id='dm_auto_send' name='auto_send'" + String(dm_auto_send ? " checked" : "") + " onclick='toggleAutoSendFields()'> Enable auto send Libre reading</label>";
+  html += "</div>";
+  
+  html += "<div class='form-group' id='2fa_container' style='display:" + String(dm_2fa_pending ? "block" : "none") + ";border:1px solid #f0ad4e;padding:15px;border-radius:6px;background:#2a251b;'>";
+  html += "<label style='color:#f0ad4e;'>2FA Code Required</label>";
+  html += "<input type='text' id='two_fa_code' name='two_fa_code' placeholder='Enter code from email' style='margin-bottom:10px;'>";
+  html += "<div class='btn-row'>";
+  html += "<button type='button' id='btn_2fa_ok' style='background:#5cb85c;margin-top:0;' onclick='submit2FACode()'>OK</button>";
+  html += "<button type='button' id='btn_2fa_request' style='background:#f0ad4e;margin-top:0;' onclick='requestNew2FA()'>Request New 2FA</button>";
+  html += "</div>";
   html += "</div>";
   
   html += "<hr style='border:0;border-top:1px solid #333;margin:20px 0;'>";
   
   html += "<div class='form-group'>";
-  html += "<label>API Poll Interval (minutes)</label>";
+  html += "<label>Sending Interval (minutes)</label>";
   html += "<input type='number' name='poll' value='" + String(dm_api_interval) + "' min='5' max='1440'>";
   html += "</div>";
   
   html += "<div class='form-group'>";
-  html += "<label>Random Offset (minutes)</label>";
+  html += "<label>Sending Random Offset (minutes)</label>";
   html += "<input type='number' name='offset' value='" + String(dm_random_offset) + "' min='0' max='30'>";
   html += "</div>";
   
@@ -3524,8 +4111,40 @@ void handleLocalDMGet() {
   html += "</div>";
   
   html += "<div class='form-group'>";
-  html += "<label><input type='checkbox' id='dm_auto_send' name='auto_send'" + String(dm_auto_send ? " checked" : "") + " onclick='toggleAutoSendFields()'> Enable auto send Libre reading</label>";
+  html += "<label><input type='checkbox' id='dm_auto_cat' name='dm_auto_cat'" + String(dm_auto_category ? " checked" : "") + "> Enable Auto-Category Assignment</label>";
   html += "</div>";
+  
+  html += "<div class='form-group'>";
+  html += "<label>Fallback Category</label>";
+  html += "<select name='dm_fallback_cat' id='dm_fallback_cat' onchange='checkCategoriesExist()'>";
+  for (int i = 0; i < dm_categories_count; i++) {
+    String selected = (dm_fallback_category == dm_categories[i].id) ? " selected" : "";
+    html += "<option value='" + String(dm_categories[i].id) + "'" + selected + ">" + String(dm_categories[i].name) + "</option>";
+  }
+  html += "</select>";
+  html += "</div>";
+
+  html += "<details class='card' style='margin-top:20px;' open><summary style='font-weight:bold;cursor:pointer;color:#33B5E5;font-size:18px;'>Configure Category Time Slots (max 24)</summary>";
+  html += "<div style='margin-top:10px;'>";
+  html += "<table id='slots_table' style='width:100%;border-collapse:collapse;'>";
+  html += "<thead><tr style='border-bottom:1px solid #444;text-align:left;color:#888;font-size:12px;'>";
+  html += "<th style='padding:5px;width:50px;'>Active</th>";
+  html += "<th style='padding:5px;'>Category</th>";
+  html += "<th style='padding:5px;width:120px;'>Start Time</th>";
+  html += "<th style='padding:5px;width:120px;'>End Time</th>";
+  html += "<th style='padding:5px;width:80px;'>Action</th>";
+  html += "</tr></thead>";
+  html += "<tbody id='slots_body'>";
+  html += "</tbody></table>";
+  html += "<div class='btn-row' style='display:flex;flex-wrap:wrap;gap:8px;'>";
+  html += "<button type='button' class='btn-blue' style='padding:6px 12px;font-size:13px;margin:0;flex:1;min-width:120px;' onclick='addSlotRow()'>+ Add Time Slot</button>";
+  html += "<button type='button' class='btn-orange' style='padding:6px 12px;font-size:13px;margin:0;flex:2;min-width:220px;' onclick='grabMealTimes()'>Reset to Diabetes:M Portal Meal Times</button>";
+  html += "<button type='button' style='background:#33B5E5;color:#fff;padding:6px 12px;font-size:13px;border:none;border-radius:4px;cursor:pointer;margin:0;flex:1;min-width:100px;' onclick='sortTimes()'>Sort Times</button>";
+  html += "<button type='button' style='background:#5bc85c;color:#fff;padding:6px 12px;font-size:13px;border:none;border-radius:4px;cursor:pointer;margin:0;flex:1.5;min-width:160px;' onclick='redownloadCategories()'>Redownload Categories</button>";
+  html += "</div>";
+  html += "</div>";
+  html += "</details>";
+  html += "<input type='hidden' id='dm_cat_rules_json' name='dm_cat_rules_json' value=''>";
   
   html += "<div class='form-group'>";
   html += "<label>Start Sending</label>";
@@ -3612,109 +4231,320 @@ void handleLocalDMGet() {
   
   // Scripts
   html += "<script>";
-  html += "function submitForm() {";
-  html += "  document.getElementById('dm_form').submit();";
+  html += "var dm_categories = [";
+  for (int i = 0; i < dm_categories_count; i++) {
+    html += "{id:" + String(dm_categories[i].id) + ",name:'" + String(dm_categories[i].name) + "'}";
+    if (i < dm_categories_count - 1) html += ",";
+  }
+  html += "\n];\n";
+  html += "var dm_rules = [";
+  for (int i = 0; i < dm_cat_rules_count; i++) {
+    html += "{cat_id:" + String(dm_cat_rules[i].category_id) + ",";
+    html += "start:'" + formatMinutesToHM(dm_cat_rules[i].start_min) + "',";
+    html += "end:'" + formatMinutesToHM(dm_cat_rules[i].end_min) + "',";
+    html += "enabled:" + String(dm_cat_rules[i].enabled ? "true" : "false") + "}";
+    if (i < dm_cat_rules_count - 1) html += ",";
+  }
+  html += "\n];\n";
+  html += "var meal_b_start = " + String(dm_b_start) + ";\n";
+  html += "var meal_b_end = " + String(dm_b_end) + ";\n";
+  html += "var meal_l_start = " + String(dm_l_start) + ";\n";
+  html += "var meal_l_end = " + String(dm_l_end) + ";\n";
+  html += "var meal_d_start = " + String(dm_d_start) + ";\n";
+  html += "var meal_d_end = " + String(dm_d_end) + ";\n";
+  html += "function addSlotRow(catId, startVal, endVal, enabled) {\n";
+  html += "  var tbody = document.getElementById('slots_body');\n";
+  html += "  var rowCount = tbody.rows.length;\n";
+  html += "  if (rowCount >= 24) { alert('Maximum 24 slots allowed.'); return; }\n";
+  html += "  catId = catId !== undefined ? catId : 8;\n";
+  html += "  startVal = startVal !== undefined ? startVal : '08:00';\n";
+  html += "  endVal = endVal !== undefined ? endVal : '09:00';\n";
+  html += "  enabled = enabled !== undefined ? enabled : true;\n";
+  html += "  var tr = document.createElement('tr');\n";
+  html += "  tr.style.borderBottom = '1px solid #333';\n";
+  html += "  var td1 = document.createElement('td');\n";
+  html += "  td1.style.padding = '5px';\n";
+  html += "  td1.innerHTML = '<input type=\"checkbox\" class=\"slot-en\" ' + (enabled ? 'checked' : '') + ' onchange=\"checkOverlaps()\">';\n";
+  html += "  tr.appendChild(td1);\n";
+  html += "  var td2 = document.createElement('td');\n";
+  html += "  td2.style.padding = '5px';\n";
+  html += "  var select = document.createElement('select');\n";
+  html += "  select.className = 'slot-cat';\n";
+  html += "  select.onchange = function() { checkCategoriesExist(); };\n";
+  html += "  dm_categories.forEach(function(cat) {\n";
+  html += "    var opt = document.createElement('option');\n";
+  html += "    opt.value = cat.id;\n";
+  html += "    opt.textContent = cat.name;\n";
+  html += "    if (cat.id == catId) opt.selected = true;\n";
+  html += "    select.appendChild(opt);\n";
+  html += "  });\n";
+  html += "  td2.appendChild(select);\n";
+  html += "  tr.appendChild(td2);\n";
+  html += "  var td3 = document.createElement('td');\n";
+  html += "  td3.style.padding = '5px';\n";
+  html += "  td3.innerHTML = '<input type=\"time\" class=\"slot-start\" value=\"' + startVal + '\" onchange=\"checkOverlaps()\">';\n";
+  html += "  tr.appendChild(td3);\n";
+  html += "  var td4 = document.createElement('td');\n";
+  html += "  td4.style.padding = '5px';\n";
+  html += "  td4.innerHTML = '<input type=\"time\" class=\"slot-end\" value=\"' + endVal + '\" onchange=\"checkOverlaps()\">';\n";
+  html += "  tr.appendChild(td4);\n";
+  html += "  var td5 = document.createElement('td');\n";
+  html += "  td5.style.padding = '5px';\n";
+  html += "  td5.innerHTML = '<button type=\"button\" class=\"btn-orange\" style=\"margin-top:0;padding:4px 8px;font-size:12px;\" onclick=\"deleteSlotRow(this)\">Delete</button>';\n";
+  html += "  tr.appendChild(td5);\n";
+  html += "  tbody.appendChild(tr);\n";
+  html += "}\n";
+  html += "function deleteSlotRow(btn) {\n";
+  html += "  var tr = btn.parentNode.parentNode;\n";
+  html += "  tr.parentNode.removeChild(tr);\n";
+  html += "  checkOverlaps();\n";
+  html += "  checkCategoriesExist();\n";
+  html += "}\n";
+  html += "function initSlots() {\n";
+  html += "  var tbody = document.getElementById('slots_body');\n";
+  html += "  if (tbody) {\n";
+  html += "    tbody.innerHTML = '';\n";
+  html += "    dm_rules.forEach(function(r) {\n";
+  html += "      addSlotRow(r.cat_id, r.start, r.end, r.enabled);\n";
+  html += "    });\n";
+  html += "    checkOverlaps();\n";
+  html += "    checkCategoriesExist();\n";
+  html += "  }\n";
+  html += "}\n";
+  html += "function grabMealTimes() {\n";
+  html += "  if (!confirm('WARNING: This will overwrite your current custom time slot settings with the default meal times from your Diabetes:M portal profile. Do you want to proceed?')) return;\n";
+  html += "  var tbody = document.getElementById('slots_body');\n";
+  html += "  tbody.innerHTML = '';\n";
+  html += "  function toHM(m) {\n";
+  html += "    var h = Math.floor(m / 60) % 24;\n";
+  html += "    var min = m % 60;\n";
+  html += "    return (h < 10 ? '0' + h : h) + ':' + (min < 10 ? '0' + min : min);\n";
+  html += "  }\n";
+  html += "  var after_b_end = meal_l_start - 61;\n";
+  html += "  if (after_b_end < meal_b_end + 1) after_b_end = meal_b_end + 1;\n";
+  html += "  var after_l_end = meal_d_start - 61;\n";
+  html += "  if (after_l_end < meal_l_end + 1) after_l_end = meal_l_end + 1;\n";
+  html += "  var after_d_end = 21 * 60 - 1;\n";
+  html += "  if (after_d_end < meal_d_end + 1) after_d_end = meal_d_end + 1;\n";
+  html += "  var night_end = meal_b_start - 61;\n";
+  html += "  if (night_end < 0) night_end = 0;\n";
+  html += "  addSlotRow(1, toHM(meal_b_start - 60), toHM(meal_b_start - 1), true);\n";
+  html += "  addSlotRow(11, toHM(meal_b_start), toHM(meal_b_end), true);\n";
+  html += "  addSlotRow(2, toHM(meal_b_end + 1), toHM(after_b_end), true);\n";
+  html += "  addSlotRow(3, toHM(meal_l_start - 60), toHM(meal_l_start - 1), true);\n";
+  html += "  addSlotRow(12, toHM(meal_l_start), toHM(meal_l_end), true);\n";
+  html += "  addSlotRow(4, toHM(meal_l_end + 1), toHM(after_l_end), true);\n";
+  html += "  addSlotRow(5, toHM(meal_d_start - 60), toHM(meal_d_start - 1), true);\n";
+  html += "  addSlotRow(13, toHM(meal_d_start), toHM(meal_d_end), true);\n";
+  html += "  addSlotRow(6, toHM(meal_d_end + 1), toHM(after_d_end), true);\n";
+  html += "  addSlotRow(10, '21:00', '23:59', true);\n";
+  html += "  addSlotRow(7, '00:00', toHM(night_end), true);\n";
+  html += "  checkOverlaps();\n";
+  html += "  checkCategoriesExist();\n";
+  html += "}\n";
+  html += "function rangeIntersects(s1, e1, s2, e2) {\n";
+  html += "  var m1 = new Array(1440).fill(false);\n";
+  html += "  if (s1 <= e1) {\n";
+  html += "    for (var m = s1; m <= e1; m++) m1[m] = true;\n";
+  html += "  } else {\n";
+  html += "    for (var m = s1; m < 1440; m++) m1[m] = true;\n";
+  html += "    for (var m = 0; m <= e1; m++) m1[m] = true;\n";
+  html += "  }\n";
+  html += "  if (s2 <= e2) {\n";
+  html += "    for (var m = s2; m <= e2; m++) { if (m1[m]) return true; }\n";
+  html += "  } else {\n";
+  html += "    for (var m = s2; m < 1440; m++) { if (m1[m]) return true; }\n";
+  html += "    for (var m = 0; m <= e2; m++) { if (m1[m]) return true; }\n";
+  html += "  }\n";
+  html += "  return false;\n";
+  html += "}\n";
+  html += "function checkOverlaps() {\n";
+  html += "  var tbody = document.getElementById('slots_body');\n";
+  html += "  if (!tbody) return false;\n";
+  html += "  var rows = tbody.querySelectorAll('tr');\n";
+  html += "  rows.forEach(function(row) {\n";
+  html += "    var sEl = row.querySelector('.slot-start');\n";
+  html += "    var eEl = row.querySelector('.slot-end');\n";
+  html += "    if (sEl) { sEl.style.borderColor = ''; sEl.style.backgroundColor = ''; }\n";
+  html += "    if (eEl) { eEl.style.borderColor = ''; eEl.style.backgroundColor = ''; }\n";
+  html += "  });\n";
+  html += "  var parsed = [];\n";
+  html += "  rows.forEach(function(row, idx) {\n";
+  html += "    var en = row.querySelector('.slot-en');\n";
+  html += "    var sEl = row.querySelector('.slot-start');\n";
+  html += "    var eEl = row.querySelector('.slot-end');\n";
+  html += "    if (en && en.checked && sEl && eEl) {\n";
+  html += "      var sVal = sEl.value, eVal = eEl.value;\n";
+  html += "      if (sVal && eVal) {\n";
+  html += "        var sParts = sVal.split(':'), eParts = eVal.split(':');\n";
+  html += "        var sMin = parseInt(sParts[0],10)*60 + parseInt(sParts[1],10);\n";
+  html += "        var eMin = parseInt(eParts[0],10)*60 + parseInt(eParts[1],10);\n";
+  html += "        parsed.push({ idx: idx, start: sMin, end: eMin, sEl: sEl, eEl: eEl });\n";
+  html += "      }\n";
+  html += "    }\n";
+  html += "  });\n";
+  html += "  var overlap = false;\n";
+  html += "  for (var i = 0; i < parsed.length; i++) {\n";
+  html += "    for (var j = i + 1; j < parsed.length; j++) {\n";
+  html += "      if (rangeIntersects(parsed[i].start, parsed[i].end, parsed[j].start, parsed[j].end)) {\n";
+  html += "        overlap = true;\n";
+  html += "        parsed[i].sEl.style.borderColor = '#d9534f';\n";
+  html += "        parsed[i].sEl.style.backgroundColor = '#3d1c1c';\n";
+  html += "        parsed[i].eEl.style.borderColor = '#d9534f';\n";
+  html += "        parsed[i].eEl.style.backgroundColor = '#3d1c1c';\n";
+  html += "        parsed[j].sEl.style.borderColor = '#d9534f';\n";
+  html += "        parsed[j].sEl.style.backgroundColor = '#3d1c1c';\n";
+  html += "        parsed[j].eEl.style.borderColor = '#d9534f';\n";
+  html += "        parsed[j].eEl.style.backgroundColor = '#3d1c1c';\n";
+  html += "      }\n";
+  html += "    }\n";
+  html += "  }\n";
+  html += "  return overlap;\n";
+  html += "}\n";
+  html += "function checkCategoriesExist() {\n";
+  html += "  var valid = true;\n";
+  html += "  var fbSelect = document.getElementById('dm_fallback_cat');\n";
+  html += "  if (fbSelect) { fbSelect.style.borderColor = ''; fbSelect.style.backgroundColor = ''; }\n";
+  html += "  var tbody = document.getElementById('slots_body');\n";
+  html += "  if (tbody) {\n";
+  html += "    var rows = tbody.querySelectorAll('tr');\n";
+  html += "    rows.forEach(function(row) {\n";
+  html += "      var select = row.querySelector('.slot-cat');\n";
+  html += "      if (select) { select.style.borderColor = ''; select.style.backgroundColor = ''; }\n";
+  html += "    });\n";
+  html += "  }\n";
+  html += "  if (fbSelect) {\n";
+  html += "    var fbVal = parseInt(fbSelect.value, 10);\n";
+  html += "    var fbFound = dm_categories.some(function(c) { return c.id == fbVal; });\n";
+  html += "    if (!fbFound) {\n";
+  html += "      fbSelect.style.borderColor = '#d9534f';\n";
+  html += "      fbSelect.style.backgroundColor = '#3d1c1c';\n";
+  html += "      valid = false;\n";
+  html += "    }\n";
+  html += "  }\n";
+  html += "  if (tbody) {\n";
+  html += "    var rows = tbody.querySelectorAll('tr');\n";
+  html += "    rows.forEach(function(row) {\n";
+  html += "      var select = row.querySelector('.slot-cat');\n";
+  html += "      if (select) {\n";
+  html += "        var val = parseInt(select.value, 10);\n";
+  html += "        var found = dm_categories.some(function(c) { return c.id == val; });\n";
+  html += "        if (!found) {\n";
+  html += "          select.style.borderColor = '#d9534f';\n";
+  html += "          select.style.backgroundColor = '#3d1c1c';\n";
+  html += "          valid = false;\n";
+  html += "        }\n";
+  html += "      }\n";
+  html += "    });\n";
+  html += "  }\n";
+  html += "  return valid;\n";
+  html += "}\n";
+  html += "function sortTimes() {\n";
+  html += "  var tbody = document.getElementById('slots_body');\n";
+  html += "  if (!tbody) return;\n";
+  html += "  var rows = tbody.querySelectorAll('tr');\n";
+  html += "  var list = [];\n";
+  html += "  rows.forEach(function(row) {\n";
+  html += "    var en = row.querySelector('.slot-en').checked;\n";
+  html += "    var cat = parseInt(row.querySelector('.slot-cat').value, 10);\n";
+  html += "    var start = row.querySelector('.slot-start').value;\n";
+  html += "    var end = row.querySelector('.slot-end').value;\n";
+  html += "    var parts = start.split(':');\n";
+  html += "    var mins = parseInt(parts[0],10)*60 + parseInt(parts[1],10);\n";
+  html += "    list.push({ en: en, cat: cat, start: start, end: end, mins: mins });\n";
+  html += "  });\n";
+  html += "  list.sort(function(a, b) { return a.mins - b.mins; });\n";
+  html += "  tbody.innerHTML = '';\n";
+  html += "  list.forEach(function(item) {\n";
+  html += "    addSlotRow(item.cat, item.start, item.end, item.en);\n";
+  html += "  });\n";
+  html += "  checkOverlaps();\n";
+  html += "  checkCategoriesExist();\n";
+  html += "}\n";
+  html += "function redownloadCategories() {\n";
+  html += "  var statusDiv = document.getElementById('status_msg');\n";
+  html += "  statusDiv.innerHTML = \"<p style='color:#33B5E5;'>Redownloading categories... Please wait...</p>\";\n";
+  html += "  var formData = new FormData();\n";
+  html += "  formData.append('email', document.getElementById('dm_email').value);\n";
+  html += "  formData.append('password', document.getElementById('dm_password').value);\n";
+  html += "  formData.append('two_fa_code', document.getElementById('two_fa_code').value);\n";
+  html += "  var xhr = new XMLHttpRequest();\n";
+  html += "  xhr.open('POST', '/test-dm-connection', true);\n";
+  html += "  xhr.onload = function() {\n";
+  html += "    if (xhr.status === 200) {\n";
+  html += "      try {\n";
+  html += "        var res = JSON.parse(xhr.responseText);\n";
+  html += "        statusDiv.innerHTML = \"<div style='color:#5cb85c;border:1px solid #5cb85c;padding:10px;border-radius:4px;background:#1b2a1b;'><b>Categories Redownloaded Successfully!</b></div>\";\n";
+  html += "        if (res.categories) {\n";
+  html += "          dm_categories = res.categories;\n";
+  html += "          var dropdown = document.getElementById('dm_fallback_cat');\n";
+  html += "          if (dropdown) {\n";
+  html += "            var currentVal = dropdown.value;\n";
+  html += "            dropdown.innerHTML = '';\n";
+  html += "            dm_categories.forEach(function(cat) {\n";
+  html += "              var opt = document.createElement('option');\n";
+  html += "              opt.value = cat.id;\n";
+  html += "              opt.textContent = cat.name;\n";
+  html += "              if (cat.id == currentVal) opt.selected = true;\n";
+  html += "              dropdown.appendChild(opt);\n";
+  html += "            });\n";
+  html += "          }\n";
+  html += "          var tbody = document.getElementById('slots_body');\n";
+  html += "          var rows = tbody.querySelectorAll('tr');\n";
+  html += "          rows.forEach(function(row) {\n";
+  html += "            var select = row.querySelector('.slot-cat');\n";
+  html += "            if (select) {\n";
+  html += "              var currentVal = select.value;\n";
+  html += "              select.innerHTML = '';\n";
+  html += "              dm_categories.forEach(function(cat) {\n";
+  html += "                var opt = document.createElement('option');\n";
+  html += "                opt.value = cat.id;\n";
+  html += "                opt.textContent = cat.name;\n";
+  html += "                if (cat.id == currentVal) opt.selected = true;\n";
+  html += "                select.appendChild(opt);\n";
+  html += "              });\n";
+  html += "            }\n";
+  html += "          });\n";
+  html += "          checkCategoriesExist();\n";
+  html += "        }\n";
+  html += "      } catch(e) {\n";
+  html += "        statusDiv.innerHTML = \"<div style='color:#5cb85c;border:1px solid #5cb85c;padding:10px;border-radius:4px;background:#1b2a1b;'><b>Success:</b> \" + xhr.responseText + \"</div>\";\n";
+  html += "      }\n";
+  html += "    } else {\n";
+  html += "      if (xhr.responseText.indexOf('2FA_REQUIRED') !== -1) {\n";
+  html += "        document.getElementById('2fa_container').style.display = 'block';\n";
+  html += "        statusDiv.innerHTML = \"<div style='color:#f0ad4e;border:1px solid #f0ad4e;padding:10px;border-radius:4px;background:#2a251b;'><b>2FA Code Required:</b> A verification code has been generated. Please check your email, enter the code in the 2FA Code input field, and click Redownload Categories again.</div>\";\n";
+  html += "      } else {\n";
+  html += "        statusDiv.innerHTML = \"<div style='color:#d9534f;border:1px solid #d9534f;padding:10px;border-radius:4px;background:#2a1b1b;'><b>Redownload Failed:</b> \" + xhr.responseText + \"</div>\";\n";
+  html += "      }\n";
+  html += "    }\n";
+  html += "  };\n";
+  html += "  xhr.send(formData);\n";
+  html += "}\n";
+  html += "function submitForm() {\n";
+  html += "  if (!checkCategoriesExist()) {\n";
+  html += "    alert('One or more selected categories no longer exist. The invalid fields have been highlighted in red. Please correct them before saving.');\n";
+  html += "    return;\n";
+  html += "  }\n";
+  html += "  if (checkOverlaps()) {\n";
+  html += "    alert('Time slot configurations overlap. The overlapping fields have been highlighted in red. Please correct them before saving.');\n";
+  html += "    return;\n";
+  html += "  }\n";
+  html += "  var tbody = document.getElementById('slots_body');\n";
+  html += "  var rows = tbody.querySelectorAll('tr');\n";
+  html += "  var rules = [];\n";
+  html += "  for (var i = 0; i < rows.length; i++) {\n";
+  html += "    var row = rows[i];\n";
+  html += "    var en = row.querySelector('.slot-en').checked;\n";
+  html += "    var catId = parseInt(row.querySelector('.slot-cat').value, 10);\n";
+  html += "    var start = row.querySelector('.slot-start').value;\n";
+  html += "    var end = row.querySelector('.slot-end').value;\n";
+  html += "    rules.push({cat_id: catId, start: start, end: end, enabled: en});\n";
+  html += "  }\n";
+  html += "  document.getElementById('dm_cat_rules_json').value = JSON.stringify(rules);\n";
+  html += "  document.getElementById('dm_form').submit();\n";
   html += "}";
-  html += "function toggleConnectionFields() {";
-  html += "  var connEnabled = document.getElementById('dm_conn_en').checked;";
-  html += "  var container = document.getElementById('dm_fields_container');";
-  html += "  container.style.display = connEnabled ? 'block' : 'none';";
-  html += "  var elements = container.querySelectorAll('input, select, button');";
-  html += "  elements.forEach(function(el) {";
-  html += "    el.disabled = !connEnabled;";
-  html += "  });";
-  html += "  var logsContainer = document.getElementById('dm_logs_container');";
-  html += "  if (logsContainer) {";
-  html += "    logsContainer.style.display = connEnabled ? 'block' : 'none';";
-  html += "  }";
-  html += "  if (connEnabled) {";
-  html += "    toggleAutoSendFields();";
-  html += "    toggleHeartbeatFields();";
-  html += "  }";
-  html += "}";
-  html += "function toggleAutoSendFields() {";
-  html += "  var autoSend = document.getElementById('dm_auto_send').checked;";
-  html += "  document.getElementById('dm_start').disabled = !autoSend;";
-  html += "  document.getElementById('dm_stop').disabled = !autoSend;";
-  html += "}";
-  html += "function toggleHeartbeatFields() {";
-  html += "  var hbEnabled = document.getElementById('dm_hb_en').checked;";
-  html += "  document.getElementById('dm_hb_int').disabled = !hbEnabled;";
-  html += "}";
-  
-  html += "function checkLoginEntered() {";
-  html += "  var email = document.getElementById('dm_email').value;";
-  html += "  var pwd = document.getElementById('dm_password').value;";
-  html += "  if (!email || !pwd) {";
-  html += "    alert('Please configure your Diabetes:M email and password first.');";
-  html += "    return false;";
-  html += "  }";
-  html += "  return true;";
-  html += "}";
-  
-  html += "function runTestConnection() {";
-  html += "  if (!checkLoginEntered()) return;";
-  html += "  var statusDiv = document.getElementById('status_msg');";
-  html += "  statusDiv.innerHTML = \"<p style='color:#33B5E5;'>Testing Connection... Please wait...</p>\";";
-  html += "  var formData = new FormData();";
-  html += "  formData.append('email', document.getElementById('dm_email').value);";
-  html += "  formData.append('password', document.getElementById('dm_password').value);";
-  html += "  formData.append('two_fa_code', document.getElementById('two_fa_code').value);";
-  html += "  var xhr = new XMLHttpRequest();";
-  html += "  xhr.open('POST', '/test-dm-connection', true);";
-  html += "  xhr.onload = function() {";
-  html += "    if (xhr.status === 200) {";
-  html += "      statusDiv.innerHTML = \"<div style='color:#5cb85c;border:1px solid #5cb85c;padding:10px;border-radius:4px;background:#1b2a1b;'><b>Test Connection Success:</b> \" + xhr.responseText + \"</div>\";";
-  html += "    } else {";
-  html += "      if (xhr.responseText.indexOf('2FA_REQUIRED') !== -1) {";
-  html += "        document.getElementById('2fa_container').style.display = 'block';";
-  html += "        statusDiv.innerHTML = \"<div style='color:#f0ad4e;border:1px solid #f0ad4e;padding:10px;border-radius:4px;background:#2a251b;'><b>2FA Code Required:</b> A verification code has been generated. Please check your email, enter the code in the 2FA Code input field, and click Test Connection again.</div>\";";
-  html += "      } else {";
-  html += "        statusDiv.innerHTML = \"<div style='color:#d9534f;border:1px solid #d9534f;padding:10px;border-radius:4px;background:#2a1b1b;'><b>Test Connection Failed:</b> \" + xhr.responseText + \"</div>\";";
-  html += "      }";
-  html += "    }";
-  html += "  };";
-  html += "  xhr.send(formData);";
-  html += "}";
-  
-  html += "function runTestUpload() {";
-  html += "  if (!checkLoginEntered()) return;";
-  html += "  var defaultVal = " + String(last_glucose > 0 ? (strcmp(llu_units, "mmol/L") == 0 ? String(last_glucose / 18.0182, 1) : String((int)last_glucose)) : "5.5") + ";";
-  html += "  var currentUnit = '" + String(llu_units) + "';";
-  html += "  var valStr = prompt('Enter glucose value to upload (' + currentUnit + '):', defaultVal);";
-  html += "  if (valStr == null) return;";
-  html += "  var val = parseFloat(valStr);";
-  html += "  if (isNaN(val) || val <= 0) {";
-  html += "    alert('Invalid glucose value.');";
-  html += "    return;";
-  html += "  }";
-  html += "  var statusDiv = document.getElementById('status_msg');";
-  html += "  statusDiv.innerHTML = \"<p style='color:#33B5E5;'>Uploading test reading... Please wait...</p>\";";
-  html += "  var formData = new FormData();";
-  html += "  formData.append('email', document.getElementById('dm_email').value);";
-  html += "  formData.append('password', document.getElementById('dm_password').value);";
-  html += "  formData.append('two_fa_code', document.getElementById('two_fa_code').value);";
-  html += "  formData.append('value', val);";
-  html += "  formData.append('notes', document.getElementById('dm_note').value);";
-  html += "  var xhr = new XMLHttpRequest();";
-  html += "  xhr.open('POST', '/test-dm-upload', true);";
-  html += "  xhr.onload = function() {";
-  html += "    if (xhr.status === 200) {";
-  html += "      statusDiv.innerHTML = \"<div style='color:#5cb85c;border:1px solid #5cb85c;padding:10px;border-radius:4px;background:#1b2a1b;'><b>Test Upload Success:</b> \" + xhr.responseText + \"</div>\";";
-  html += "    } else {";
-  html += "      if (xhr.responseText.indexOf('2FA_REQUIRED') !== -1) {";
-  html += "        document.getElementById('2fa_container').style.display = 'block';";
-  html += "        statusDiv.innerHTML = \"<div style='color:#f0ad4e;border:1px solid #f0ad4e;padding:10px;border-radius:4px;background:#2a251b;'><b>2FA Code Required:</b> A verification code has been generated. Please check your email, enter the code in the 2FA Code input field, and click Test Upload again.</div>\";";
-  html += "      } else {";
-  html += "        statusDiv.innerHTML = \"<div style='color:#d9534f;border:1px solid #d9534f;padding:10px;border-radius:4px;background:#2a1b1b;'><b>Test Upload Failed:</b> \" + xhr.responseText + \"</div>\";";
-  html += "      }";
-  html += "    }";
-  html += "  };";
-  html += "  xhr.send(formData);";
-  html += "}";
-  html += "</script>";
-  html += "</body></html>";
-  
+  html += "</script></body></html>";
   localServer.send(200, "text/html", html);
 }
 
@@ -3733,6 +4563,12 @@ void handleLocalDMSave() {
       password.toCharArray(dm_password, sizeof(dm_password));
     }
     dm_enable_2fa = localServer.hasArg("enable_2fa");
+    
+    // Only clear 2FA pending state on save if 2FA is disabled.
+    // If 2FA is enabled, they must successfully run "Test Connection" with a code first.
+    if (!dm_enable_2fa) {
+      set2FAPending(false);
+    }
     dm_auto_send = localServer.hasArg("auto_send");
     dm_enable_heartbeat = localServer.hasArg("dm_hb_en");
     if (localServer.hasArg("dm_hb_int")) {
@@ -3771,6 +4607,41 @@ void handleLocalDMSave() {
       strcpy(dm_timezone_json, "UTC");
       strcpy(dm_timezone_posix, "UTC0");
     }
+    dm_auto_category = localServer.hasArg("dm_auto_cat");
+    if (localServer.hasArg("dm_fallback_cat")) {
+      dm_fallback_category = localServer.arg("dm_fallback_cat").toInt();
+    }
+    
+    if (localServer.hasArg("dm_cat_rules_json")) {
+      String rules_json = localServer.arg("dm_cat_rules_json");
+      DynamicJsonDocument doc(4096);
+      DeserializationError err = deserializeJson(doc, rules_json);
+      if (!err) {
+        JsonArray arr = doc.as<JsonArray>();
+        int count = 0;
+        for (JsonVariant val : arr) {
+          if (count >= 24) break;
+          
+          int cat_id = val["cat_id"].as<int>();
+          String start_str = val["start"].as<String>();
+          String end_str = val["end"].as<String>();
+          bool enabled = val["enabled"].as<bool>();
+          
+          int start_h = 0, start_m = 0;
+          int end_h = 0, end_m = 0;
+          sscanf(start_str.c_str(), "%d:%d", &start_h, &start_m);
+          sscanf(end_str.c_str(), "%d:%d", &end_h, &end_m);
+          
+          dm_cat_rules[count].category_id = cat_id;
+          dm_cat_rules[count].start_min = start_h * 60 + start_m;
+          dm_cat_rules[count].end_min = end_h * 60 + end_m;
+          dm_cat_rules[count].enabled = enabled;
+          
+          count++;
+        }
+        dm_cat_rules_count = count;
+      }
+    }
     
     setenv("TZ", dm_timezone_posix, 1);
     tzset();
@@ -3793,6 +4664,12 @@ void handleLocalDMSave() {
     preferences.putString("dm_tz_posix", dm_timezone_posix);
     preferences.putBool("dm_hb_en", dm_enable_heartbeat);
     preferences.putInt("dm_hb_int", dm_heartbeat_interval);
+    preferences.putBool("dm_auto_cat", dm_auto_category);
+    preferences.putInt("dm_fallback_cat", dm_fallback_category);
+    preferences.putInt("dm_cat_rules_cnt", dm_cat_rules_count);
+    if (dm_cat_rules_count > 0) {
+      preferences.putBytes("dm_cat_rules", dm_cat_rules, dm_cat_rules_count * sizeof(CategoryTimeRule));
+    }
   }
   preferences.end();
   
@@ -3832,15 +4709,30 @@ void handleLocalDMTestConnection() {
   
   if (can_use_existing_token) {
     profile_ok = diabetesMGetProfile(profile_info);
-    if (!profile_ok) {
-      // If profile fetch fails, the token might be expired; retry via login below
+    if (profile_ok) {
+      String cat_err = "";
+      bool cat_ok = diabetesMGetCategories(cat_err);
+      
+      DynamicJsonDocument resp_doc(4096);
+      if (cat_ok) {
+        resp_doc["profile"] = profile_info;
+      } else {
+        resp_doc["profile"] = profile_info + " (Warning: Failed to fetch categories: " + cat_err + ")";
+      }
+      
+      JsonArray cats_arr = resp_doc.createNestedArray("categories");
+      for (int i = 0; i < dm_categories_count; i++) {
+        JsonObject cat_obj = cats_arr.createNestedObject();
+        cat_obj["id"] = dm_categories[i].id;
+        cat_obj["name"] = dm_categories[i].name;
+      }
+      String resp_str = "";
+      serializeJson(resp_doc, resp_str);
+      localServer.send(200, "application/json", resp_str);
+      return;
+    } else {
       can_use_existing_token = false;
     }
-  }
-  
-  if (can_use_existing_token) {
-    localServer.send(200, "text/plain", profile_info);
-    return;
   }
   
   email.toCharArray(dm_email, sizeof(dm_email));
@@ -3862,7 +4754,25 @@ void handleLocalDMTestConnection() {
   profile_ok = diabetesMGetProfile(profile_info);
   
   if (profile_ok) {
-    localServer.send(200, "text/plain", profile_info);
+    String cat_err = "";
+    bool cat_ok = diabetesMGetCategories(cat_err);
+    
+    DynamicJsonDocument resp_doc(4096);
+    if (cat_ok) {
+      resp_doc["profile"] = profile_info;
+    } else {
+      resp_doc["profile"] = profile_info + " (Warning: Failed to fetch categories: " + cat_err + ")";
+    }
+    
+    JsonArray cats_arr = resp_doc.createNestedArray("categories");
+    for (int i = 0; i < dm_categories_count; i++) {
+      JsonObject cat_obj = cats_arr.createNestedObject();
+      cat_obj["id"] = dm_categories[i].id;
+      cat_obj["name"] = dm_categories[i].name;
+    }
+    String resp_str = "";
+    serializeJson(resp_doc, resp_str);
+    localServer.send(200, "application/json", resp_str);
   } else {
     orig_email.toCharArray(dm_email, sizeof(dm_email));
     orig_pwd.toCharArray(dm_password, sizeof(dm_password));
@@ -3929,5 +4839,166 @@ void handleLocalDMTestUpload() {
   } else {
     localServer.send(400, "text/plain", "Upload failed: " + upload_err);
   }
+}
+
+void handleLocalWifiGet() {
+  if (!checkAuth()) return;
+  if (checkForceReset()) return;
+  
+  String html = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'><style>";
+  html += "body { font-family:sans-serif; background:#181a1b; color:#fff; padding:20px; text-align:center; }";
+  html += "h2 { color:#33B5E5; text-align:center; }";
+  html += ".card { background:#222; padding:15px; border-radius:8px; margin-bottom:20px; border:1px solid #333; text-align:left; max-width:600px; margin-left:auto; margin-right:auto; box-sizing:border-box; }";
+  html += ".form-group { margin-bottom:15px; }";
+  html += "label { display:block; margin-bottom:5px; color:#aaa; font-weight:bold; }";
+  html += "input { width:100%; padding:10px; border-radius:4px; border:1px solid #444; background:#111; color:#fff; box-sizing:border-box; font-size:16px; }";
+  html += ".btn { display:block; width:100%; padding:12px; text-align:center; background:#5cb85c; color:#fff; text-decoration:none; border-radius:4px; font-weight:bold; border:none; cursor:pointer; margin-top:20px; font-size:16px; box-sizing:border-box; }";
+  html += ".btn-blue { background:#33B5E5; }";
+  html += ".btn-grey { background:#555; margin-top:10px; }";
+  html += "</style></head><body>";
+  
+  html += "<div class='card'>";
+  html += "<h2>Network & Wi-Fi Configuration</h2>";
+  html += "<form action='/save-wifi' method='POST' onsubmit='return confirmWifiChange();'>";
+  
+  html += "<div class='form-group'>";
+  html += "<label>Current Network (SSID)</label>";
+  html += "<input type='text' id='wifi_ssid' name='ssid' value='" + WiFi.SSID() + "' placeholder='Enter Wi-Fi SSID' required>";
+  html += "</div>";
+  
+  html += "<div class='form-group'>";
+  html += "<label>Wi-Fi Password</label>";
+  html += "<input type='password' id='wifi_pwd' name='password' placeholder='Enter Wi-Fi Password (leave empty to keep current)'>";
+  html += "</div>";
+  
+  html += "<div class='form-group'>";
+  html += "<label>Device Name (Hostname)</label>";
+  html += "<input type='text' id='dev_name' name='device_name' value='" + String(device_name) + "' placeholder='e.g. esp32-cgm' required>";
+  html += "</div>";
+  
+  html += "<button type='submit' class='btn'>Save and Apply settings</button>";
+  html += "<a href='/hardware' class='btn btn-grey'>Cancel</a>";
+  html += "</form>";
+  html += "</div>";
+  
+  html += "<script>";
+  html += "function confirmWifiChange() {";
+  html += "  var ssid = document.getElementById('wifi_ssid').value;";
+  html += "  var name = document.getElementById('dev_name').value;";
+  html += "  var origSSID = '" + WiFi.SSID() + "';";
+  html += "  var origName = '" + String(device_name) + "';";
+  html += "  if (ssid !== origSSID || name !== origName) {";
+  html += "    return confirm('WARNING: Updating the Wi-Fi network and/or device name will cause the device to restart and reconnect. You will lose connectivity to this portal and may need to access it via a new IP address or hostname. Do you want to proceed?');";
+  html += "  }";
+  html += "  return true;";
+  html += "}";
+  html += "</script>";
+  
+  html += "</body></html>";
+  
+  localServer.send(200, "text/html", html);
+}
+
+void handleLocalWifiSave() {
+  if (!checkAuth()) return;
+  
+  if (!localServer.hasArg("ssid") || !localServer.hasArg("device_name")) {
+    localServer.send(400, "text/plain", "Missing parameters.");
+    return;
+  }
+  
+  String ssid = localServer.arg("ssid");
+  String password = localServer.arg("password");
+  String name = localServer.arg("device_name");
+  
+  name.toCharArray(device_name, sizeof(device_name));
+  
+  Preferences preferences;
+  preferences.begin("cgm-config", false);
+  preferences.putString("dev_name", name);
+  preferences.end();
+  
+  WiFi.setHostname(device_name);
+  
+  if (password.length() > 0 || ssid != WiFi.SSID()) {
+    if (password.length() > 0) {
+      WiFi.begin(ssid.c_str(), password.c_str());
+    } else {
+      WiFi.begin(ssid.c_str());
+    }
+  }
+  
+  String html = "<html><head><style>body{background:#181a1b;color:#fff;font-family:sans-serif;text-align:center;padding-top:50px;}h2{color:#5cb85c;}</style></head><body>";
+  html += "<h2>WiFi Settings Saved!</h2>";
+  html += "<p>The device is restarting to connect to the new network / apply the new device name.</p>";
+  html += "<p>Portal will close. Please reconnect your client to the same network and lookup the device.</p>";
+  html += "</body></html>";
+  localServer.send(200, "text/html", html);
+  
+  delay(2000);
+  ESP.restart();
+}
+
+void showDiagnosticsScreen() {
+  gfx.fillScreen(0x181A1B);
+  
+  gfx.setFont(&fonts::DejaVu24);
+  gfx.setTextColor(0x33B5E5);
+  gfx.drawCenterString("Device Diagnostics", 240, 20);
+  
+  gfx.setFont(&fonts::DejaVu18);
+  gfx.setTextColor(0xFFFFFF);
+  
+  int y = 70;
+  int dy = 30;
+  
+  gfx.drawString("Device Name: " + String(device_name), 20, y); y += dy;
+  gfx.drawString("IP Address: " + WiFi.localIP().toString(), 20, y); y += dy;
+  gfx.drawString("Wi-Fi SSID: " + WiFi.SSID(), 20, y); y += dy;
+  gfx.drawString("Wi-Fi Signal: " + String(WiFi.RSSI()) + " dBm", 20, y); y += dy;
+  gfx.drawString("Uptime: " + getUptimeStr(), 20, y); y += dy;
+  gfx.drawString("Free Memory: " + String(ESP.getFreeHeap() / 1024) + " KB", 20, y); y += dy;
+  
+  String last_llu = llu_last_fetch_status;
+  if (last_llu.length() > 25) last_llu = last_llu.substring(0, 25) + "...";
+  gfx.drawString("Libre Sync: " + last_llu, 20, y); y += dy;
+  
+  String last_dm = dm_last_sent_status;
+  if (last_dm.length() > 25) last_dm = last_dm.substring(0, 25) + "...";
+  gfx.drawString("Diabetes:M: " + last_dm, 20, y); y += dy;
+  
+  int btn_w = 160;
+  int btn_h = 50;
+  int btn_x = 240 - (btn_w / 2);
+  int btn_y = 380;
+  
+  gfx.fillRoundRect(btn_x, btn_y, btn_w, btn_h, 8, 0x5CB85C);
+  gfx.setFont(&fonts::DejaVu24);
+  gfx.setTextColor(0xFFFFFF);
+  gfx.drawCenterString("OK", 240, btn_y + 12);
+  
+  delay(200);
+  uint16_t tx, ty;
+  while (gfx.getTouch(&tx, &ty)) {
+    delay(50);
+  }
+  
+  bool ok_pressed = false;
+  while (!ok_pressed) {
+    localServer.handleClient();
+    delay(10);
+    
+    if (gfx.getTouch(&tx, &ty) && (tx > 0 || ty > 0)) {
+      if (tx >= btn_x && tx <= (btn_x + btn_w) && ty >= btn_y && ty <= (btn_y + btn_h)) {
+        ok_pressed = true;
+      }
+    }
+  }
+  
+  while (gfx.getTouch(&tx, &ty)) {
+    delay(50);
+  }
+  
+  drawDashboard();
 }
 
